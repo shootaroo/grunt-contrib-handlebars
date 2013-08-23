@@ -31,6 +31,32 @@ module.exports = function(grunt) {
     return name;
   };
 
+  var compile = function compile(filepath, options) {
+    var processContent = options.processContent || defaultProcessContent;
+    var processAST = options.processAST || defaultProcessAST;
+    var src = processContent(grunt.file.read(filepath));
+    var Handlebars = require('handlebars');
+    var ast, compiled;
+    try {
+      // parse the handlebars template into it's AST
+      ast = processAST(Handlebars.parse(src));
+      compiled = Handlebars.precompile(ast, options.compilerOptions || {});
+
+      // if configured to, wrap template in Handlebars.template call
+      if (options.wrapped === true) {
+        compiled = 'Handlebars.template(' + compiled + ')';
+      }
+
+      if (options.amd && options.namespace === false) {
+        compiled = 'return ' + compiled;
+      }
+      return compiled;
+    } catch (e) {
+      grunt.log.error(e);
+      grunt.fail.warn('Handlebars failed to compile ' + filepath + '.');
+    }
+  };
+
   grunt.registerMultiTask('handlebars', 'Compile handlebars templates and partials.', function() {
     var options = this.options({
       namespace: 'JST',
@@ -55,20 +81,15 @@ module.exports = function(grunt) {
     var isPartial = options.partialRegex || /^_/;
 
     // assign transformation functions
-    var processContent = options.processContent || defaultProcessContent;
     var processName = options.processName || defaultProcessName;
     var processPartialName = options.processPartialName || defaultProcessPartialName;
-    var processAST = options.processAST || defaultProcessAST;
-
-    // assign compiler options
-    var compilerOptions = options.compilerOptions || {};
 
     this.files.forEach(function(f) {
       var partials = [];
       var templates = [];
 
       // iterate files, processing partials and templates separately
-      f.src.filter(function(filepath) {
+      var files = f.src.filter(function(filepath) {
         // Warn on and remove invalid source files (if nonull was set).
         if (!grunt.file.exists(filepath)) {
           grunt.log.warn('Source file "' + filepath + '" not found.');
@@ -76,30 +97,11 @@ module.exports = function(grunt) {
         } else {
           return true;
         }
-      })
-      .forEach(function(filepath) {
-        var src = processContent(grunt.file.read(filepath));
-        var Handlebars = require('handlebars');
-        var ast, compiled, filename;
-        try {
-          // parse the handlebars template into it's AST
-          ast = processAST(Handlebars.parse(src));
-          compiled = Handlebars.precompile(ast, compilerOptions);
-
-          // if configured to, wrap template in Handlebars.template call
-          if (options.wrapped === true) {
-            compiled = 'Handlebars.template('+compiled+')';
-          }
-
-          if(options.amd && options.namespace === false) {
-            compiled = 'return ' + compiled;
-          }
-        } catch (e) {
-          grunt.log.error(e);
-          grunt.fail.warn('Handlebars failed to compile '+filepath+'.');
-        }
-
-        // register partial or add template to namespace
+      });
+      if (files.length === 1) {
+        var filepath = files[0];
+        var compiled = compile(filepath, options);
+        var filename;
         if (partialsPathRegex.test(filepath) && isPartial.test(_.last(filepath.split('/')))) {
           filename = processPartialName(filepath);
           if (options.partialsUseNamespace === true) {
@@ -112,12 +114,38 @@ module.exports = function(grunt) {
           if (options.namespace !== false) {
             templates.push(nsInfo.namespace+'['+JSON.stringify(filename)+'] = '+compiled+';');
           } else if (options.commonjs === true) {
-            templates.push('templates['+JSON.stringify(filename)+'] = '+compiled+';');
+            templates.push('templates = '+compiled+';');
+          } else if (options.node === true) {
+            templates.push('module.exports = '+compiled+';');
           } else {
             templates.push(compiled);
           }
         }
-      });
+      } else {
+        files.forEach(function(filepath) {
+          var compiled = compile(filepath, options);
+          var filename;
+
+          // register partial or add template to namespace
+          if (partialsPathRegex.test(filepath) && isPartial.test(_.last(filepath.split('/')))) {
+            filename = processPartialName(filepath);
+            if (options.partialsUseNamespace === true) {
+              partials.push('Handlebars.registerPartial('+JSON.stringify(filename)+', '+nsInfo.namespace+'['+JSON.stringify(filename)+'] = '+compiled+');');
+            } else {
+              partials.push('Handlebars.registerPartial('+JSON.stringify(filename)+', '+compiled+');');
+            }
+          } else {
+            filename = processName(filepath);
+            if (options.namespace !== false) {
+              templates.push(nsInfo.namespace+'['+JSON.stringify(filename)+'] = '+compiled+';');
+            } else if (options.commonjs === true || options.node === true) {
+              templates.push('templates['+JSON.stringify(filename)+'] = '+compiled+';');
+            } else {
+              templates.push(compiled);
+            }
+          }
+        });
+      }
 
       var output = partials.concat(templates);
       if (output.length < 1) {
@@ -136,6 +164,14 @@ module.exports = function(grunt) {
             output.push(nodeExport);
           }
 
+        } else {
+          if (options.node) {
+            if (files.length > 1) {
+              output.unshift('var templates = {};');
+              output.push('module.exports = templates;');
+            }
+            output.unshift('var Handlebars = require(\'handlebars\');');
+          }
         }
 
         if (options.amd) {
